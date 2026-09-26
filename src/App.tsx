@@ -34,6 +34,7 @@ const CdnPage = lazy(() => import("@/views/cdn"));
 const DnsExitPage = lazy(() => import("@/views/dns-exit"));
 const ApiUsagePage = lazy(() => import("@/views/api-usage"));
 const PolicyPage = lazy(() => import("@/views/policy"));
+const EnvironmentReportPage = lazy(() => import("@/views/env"));
 function Redirect({ to }: { to: string }) {
   const { search, hash } = useLocation();
   const { ip } = useParams();
@@ -54,6 +55,7 @@ export function App() {
     <Routes>
       <Route element={<AppLayout />}>
         <Route path="/" element={<HomePage />} />
+        <Route path="env" element={<EnvironmentReportPage />} />
         <Route path="docs/api" element={<ApiUsagePage />} />
         <Route path="terms" element={<PolicyPage page="terms" />} />
         <Route path="privacy" element={<PolicyPage page="privacy" />} />
