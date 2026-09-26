@@ -7,6 +7,7 @@ export const navigationRoutes = [
   { value: "/status/", label: t("服务状态"), short: t("状态") },
   { value: "/network/", label: t("网络检测"), short: t("网络") },
   { value: "/browser/", label: t("浏览器检测"), short: t("浏览器") },
+  { value: "/env", label: t("环境体检"), short: t("体检") },
 ] as const;
 export const toolGroups = {
   network: [
@@ -59,6 +60,7 @@ export const legacyRoutes: Record<string, string> = {
 export function activeNavigationRoute(pathname: string) {
   const path = pathname.replace(/\/+$/, "") || "/";
   if (path === "/") return "/";
+  if (path === "/env") return "/env";
   for (const [group, routes] of Object.entries(toolGroups)) {
     if (path === `/${group}` || routes.some((route) => route.path === path))
       return `/${group}/`;
