@@ -26,9 +26,16 @@ import {
   parseDetail,
 } from "@/views/browser/result-format";
 import { detectDnsExits } from "@/views/dns-exit/api";
-import { currentIp, lookupIp } from "@/views/ip/api";
-import { runWebRtc } from "@/views/webrtc/api";
+import { getBrowserIp } from "@/views/home/api";
+import { currentIp, lookupIpWithFallback } from "@/views/ip/api";
+import { collectCandidates, isPublicCandidate } from "@/views/webrtc/api";
 import { AlertTriangle, CheckCircle2, CircleHelp, ShieldAlert } from "lucide-react";
+import { AiTroubleshooting } from "./ai-troubleshooting";
+import {
+  assessEnvDns,
+  assessEnvWebRtc,
+  type EnvHttpEgress,
+} from "./network-assessment";
 
 type Severity = "critical" | "warning" | "normal" | "unavailable";
 type ReportItem = {
@@ -42,6 +49,7 @@ type ReportItem = {
 };
 
 const TOTAL_CHECKS = 18;
+const networkDetails = new Set(["webrtc", "dns", "ipv6", "ip-risk"]);
 const severityMeta: Record<
   Severity,
   { label: string; icon: typeof ShieldAlert; color: string; bg: string }
@@ -86,6 +94,30 @@ function unavailable(id: string, title: string, reason: unknown): ReportItem {
 
 function deepModule(modules: DiagnosticModule[], name: string) {
   return modules.find((module) => module.name === name);
+}
+
+async function detectHttpFamily(family: 4 | 6, signal: AbortSignal) {
+  const matchesFamily = (ip: string) =>
+    ip.includes(":") === (family === 6) && isPublicCandidate(ip);
+  try {
+    // An IP literal keeps the Cloudflare probe on the intended address family.
+    const host = family === 4 ? "1.1.1.1" : "[2606:4700:4700::1111]";
+    const result = await trace(host, signal);
+    if (matchesFamily(result.ip)) return result;
+  } catch {
+    signal.throwIfAborted();
+  }
+  try {
+    const result = await getBrowserIp(family, signal);
+    return matchesFamily(result.ip) ? result : null;
+  } catch {
+    signal.throwIfAborted();
+    return null;
+  }
+}
+
+function httpReference({ ipv4, ipv6 }: EnvHttpEgress) {
+  return `HTTP IPv4：${ipv4?.ip ?? "未取得"}；IPv6：${ipv6?.ip ?? "未取得"}`;
 }
 
 function deepItem(
@@ -333,26 +365,39 @@ export default function EnvironmentReportPage() {
       });
     });
 
+    const httpEgress = Promise.all([
+      detectHttpFamily(4, signal),
+      detectHttpFamily(6, signal),
+    ]).then(([ipv4, ipv6]) => ({ ipv4, ipv6 }));
+
     const webrtcTask = (async () => {
       try {
-        const result = await runWebRtc(undefined, signal);
-        raw.webrtc = result;
-        const publicIps = result.results.filter((row) => row.public).map((row) => row.ip);
-        const baseline = result.baseline?.ip;
+        const [egress, candidates] = await Promise.all([
+          httpEgress,
+          collectCandidates(signal),
+        ]);
+        const assessment = assessEnvWebRtc(candidates, egress);
+        const { severity, matches, mismatches, unverified, localExposed } =
+          assessment;
+        const ips = (rows: typeof candidates) =>
+          rows.map((row) => row.ip).join("、");
         add({
           id: "webrtc",
-          title: result.different ? "WebRTC 出口不一致" : "WebRTC 出口一致",
-          severity: !baseline || !publicIps.length
-            ? "unavailable"
-            : result.different
-              ? "critical"
-              : "normal",
-          actual: publicIps.length ? `WebRTC：${publicIps.join("、")}` : "未采集到公网 Candidate",
-          expected: baseline ? `HTTP 出口：${baseline}` : "HTTP 基准未取得",
-          explanation: result.different
-            ? "检测到网页 HTTP 流量与 WebRTC/UDP 使用不同公网地址。请检查代理软件或浏览器 WebRTC 分流设置。不同出口本身不等同于真实 IP 泄露。"
-            : result.verdict,
-          technical: result,
+          title: "WebRTC 出口对照",
+          severity,
+          actual: [
+            matches.length > 0 && `一致：${ips(matches)}`,
+            mismatches.length > 0 && `公网出口不同：${ips(mismatches)}`,
+            unverified.length > 0 && `缺少同协议 HTTP 对照：${ips(unverified)}`,
+            localExposed.length > 0 && `可读取的内网地址：${localExposed.join("、")}`,
+          ].filter(Boolean).join("；") || "未采集到可对照的公网 WebRTC 地址",
+          expected: httpReference(egress),
+          explanation: severity === "normal"
+            ? "已采集的公网 WebRTC 地址与同协议的 HTTP 出口一致。"
+            : severity === "warning"
+              ? "请结合 UDP 分流规则核对不同出口及浏览器公开的内网地址。"
+              : "浏览器限制、UDP 阻断或缺少同协议 HTTP 出口时，无法确认 WebRTC 路径。",
+          technical: { egress, candidates, assessment },
         });
       } catch (error) {
         add(unavailable("webrtc", "WebRTC", error));
@@ -360,37 +405,65 @@ export default function EnvironmentReportPage() {
     })();
 
     const dnsTask = (async () => {
+      let progress: Awaited<ReturnType<typeof detectDnsExits>> | undefined;
       try {
-        const result = await detectDnsExits(signal, () => undefined);
-        raw.dns = result;
+        const [egress, result] = await Promise.all([
+          httpEgress,
+          detectDnsExits(signal, (sample) => { progress = sample; }),
+        ]);
+        const assessment = assessEnvDns(result, egress);
+        const { severity, egressCountries, mismatches, unknown, successful, failed } =
+          assessment;
         add({
           id: "dns",
           title: "DNS 出口",
-          severity: "normal",
-          actual: result.results
-            .map((row) => `${row.ip}${row.geo ? ` · ${row.geo}` : ""}`)
-            .join("；"),
-          explanation: "已读取 DNS Resolver / 出口信息。公共 Resolver 或不同 DNS 服务商本身不代表 DNS 泄露。",
-          technical: result,
+          severity,
+          actual: [
+            `采样成功 ${successful}/${result.count}，失败 ${failed}`,
+            ...result.results.map((row) =>
+              [row.ip, row.geo || row.country].filter(Boolean).join(" · "),
+            ),
+          ].join("；"),
+          expected: egressCountries.length
+            ? `HTTP 出口地区：${egressCountries.join("、")}`
+            : "未取得 HTTP 出口地区",
+          explanation: [
+            mismatches.length > 0
+              ? `请核对 ${mismatches.length} 个地区不同的解析器。公共 DNS 和代理分流可能使用不同地区。`
+              : severity === "unavailable"
+                ? "缺少地区信息，无法对照 DNS 解析器与 HTTP 出口。"
+                : "本次可核对的 DNS 解析器与 HTTP 出口地区一致。",
+            unknown > 0 && `${unknown} 个解析器的地区无法核对。`,
+            failed > 0 && "部分探测失败，结果只覆盖成功的采样。",
+          ].filter(Boolean).join(" "),
+          technical: { egress, ...result, assessment },
         });
       } catch (error) {
-        add(unavailable("dns", "DNS 出口", error));
+        add({
+          ...unavailable("dns", "DNS 出口", error),
+          actual: progress?.count
+            ? `采样成功 ${progress.count - progress.failed}/${progress.count}，失败 ${progress.failed}`
+            : "未取得检测结果",
+          technical: progress,
+        });
       }
     })();
 
     const ipv6Task = (async () => {
       try {
-        const result = await trace("ipv6.cloudflare.com", signal);
-        raw.ipv6 = result;
+        const egress = await httpEgress;
+        const { ipv4, ipv6 } = egress;
         add({
           id: "ipv6",
-          title: "IPv6",
-          severity: "normal",
-          actual: result.ip.includes(":") ? result.ip : `未返回公网 IPv6（返回 ${result.ip}）`,
-          explanation: result.ip.includes(":")
-            ? "检测到公网 IPv6，仅展示地址；没有可靠证据证明其绕过当前代理，因此不判为异常。"
-            : "未发现 IPv6 旁路地址；没有 IPv6 不属于异常。",
-          technical: result,
+          title: "HTTP IPv4／IPv6 出口",
+          severity: ipv6 ? "normal" : "unavailable",
+          actual: httpReference(egress),
+          explanation: ipv6
+            ? ipv4
+              ? "已分别采集双栈 HTTP 出口，可用于 DNS 和 WebRTC 对照。"
+              : "已采集 IPv6 HTTP 出口，IPv4 暂无可读取结果。"
+            : "当前网络未返回可读取的 IPv6 地址。仅使用 IPv4 的网络也可能出现此结果。",
+          technical: egress,
         });
       } catch (error) {
         add({
@@ -404,32 +477,60 @@ export default function EnvironmentReportPage() {
     const ipTask = (async () => {
       try {
         const me = await currentIp(signal);
-        const lookup = await lookupIp(me.ip, signal);
-        raw.ip = lookup;
+        const lookup = await lookupIpWithFallback(me.ip, signal).catch((error) => {
+          signal.throwIfAborted();
+          return error instanceof Error ? error : new Error("IP 查询暂不可用。");
+        });
+        const geo = lookup instanceof Error ? me : lookup.geo;
         const browserTimezone = environment.timezone;
-        const ipTimezone = lookup.geo.timezone;
+        const ipTimezone = geo.timezone ?? me.timezone;
+        const timezoneMismatch =
+          Boolean(ipTimezone && browserTimezone && ipTimezone !== browserTimezone);
         add({
           id: "timezone",
-          title:
-            ipTimezone && ipTimezone !== browserTimezone
-              ? "浏览器时区与当前 IP 地理环境不一致"
-              : "浏览器时区",
+          title: timezoneMismatch
+            ? "浏览器时区与当前 IP 地理环境不一致"
+            : "浏览器时区",
           severity:
-            ipTimezone && ipTimezone !== browserTimezone ? "warning" : "normal",
+            !ipTimezone || !browserTimezone
+              ? "unavailable"
+              : timezoneMismatch
+                ? "warning"
+                : "normal",
           actual: `浏览器：${browserTimezone}`,
           expected: ipTimezone
-            ? `IP 地区：${[lookup.geo.country, lookup.geo.region, lookup.geo.city].filter(Boolean).join(" · ") || "未知"}；预期时区：${ipTimezone}`
+            ? `IP 地区：${[geo.country, geo.region, geo.city].filter(Boolean).join(" · ") || "未知"}；参考时区：${ipTimezone}`
             : undefined,
           explanation:
-            ipTimezone && ipTimezone !== browserTimezone
+            timezoneMismatch
               ? "浏览器时区与 IP 所在地区不一致。建议检查浏览器的“跟随代理/IP 时区”设置。"
-              : ipTimezone
+              : ipTimezone && browserTimezone
                 ? "浏览器时区与数据源提供的 IP 时区一致。"
-                : "IP 数据未提供可靠预期时区，仅展示浏览器检测值，不进行猜测。",
-          technical: { browserTimezone, geo: lookup.geo },
+                : "浏览器或 IP 时区数据不完整，无法对照。",
+          technical: { browserTimezone, geo, ipTimezone },
         });
 
+        if (lookup instanceof Error || !lookup.risk.available) {
+          add({
+            id: "ip-risk",
+            title: "IP 风险与网络信誉",
+            severity: "unavailable",
+            actual: [
+              me.ip,
+              [geo.country, geo.region, geo.city].filter(Boolean).join(" · "),
+              geo.isp ?? me.isp,
+              geo.asn ? `AS${String(geo.asn).replace(/^AS/i, "")}` : "",
+            ].filter(Boolean).join(" · "),
+            explanation: "当前仅显示可读取的基础归属信息，信誉评分与风险标记暂不可用。",
+            technical: lookup instanceof Error ? { geo, error: lookup.message } : lookup,
+          });
+          return;
+        }
+
         const coffee = lookup.coffee;
+        const score = coffee.trust_score;
+        const validScore =
+          typeof score === "number" && Number.isFinite(score) && score >= 0 && score <= 100;
         const flags = [
           coffee.is_vpn ? "VPN" : "",
           coffee.is_proxy ? "代理" : "",
@@ -446,24 +547,26 @@ export default function EnvironmentReportPage() {
           flags.length > 0 ||
           coffee.is_datacenter === true ||
           coffee.company_type === "hosting" ||
-          (typeof coffee.trust_score === "number" && coffee.trust_score < 75);
+          (validScore && score < 75);
         add({
           id: "ip-risk",
           title: "IP 风险与网络信誉",
-          severity: reputationNotice ? "warning" : "normal",
+          severity: reputationNotice ? "warning" : validScore ? "normal" : "unavailable",
           actual: [
             me.ip,
-            coffee.trust_score == null ? "信誉分未知" : `信誉分 ${coffee.trust_score}/100`,
+            validScore ? `信誉分 ${score}/100` : "信誉分未知",
             networkType,
             coffee.isp,
             coffee.asn ? `AS${coffee.asn}` : "",
-            flags.length ? `标记：${flags.join("、")}` : "未发现风险标记",
+            flags.length ? `标记：${flags.join("、")}` : "",
           ]
             .filter(Boolean)
             .join(" · "),
           explanation: reputationNotice
             ? "这是第三方数据库提供的网络信誉提示。Hosting、Datacenter 或代理分类不等同于浏览器泄露，也不代表任何平台的官方风控结论。"
-            : "当前数据源未返回需要提示的网络信誉标记。",
+            : validScore
+              ? "当前取得的评分和风险标记未达到提示阈值。"
+              : "数据源未返回可用的信誉评分。",
           technical: lookup,
         });
       } catch (error) {
@@ -560,6 +663,8 @@ export default function EnvironmentReportPage() {
         </CardContent>
       </Card>
 
+      <AiTroubleshooting />
+
       {!running && problems.length > 0 && (
         <section className="space-y-3">
           <h2 className="text-lg font-semibold">发现的问题</h2>
@@ -575,9 +680,14 @@ export default function EnvironmentReportPage() {
           <Card>
             <CardContent className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
               {normalItems.map((item) => (
-                <div key={item.id} className="flex items-center gap-2 rounded-md bg-emerald-500/8 px-3 py-2">
+                <div key={item.id} className="flex items-start gap-2 rounded-md bg-emerald-500/8 px-3 py-2">
                   <CheckCircle2 className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
-                  <span>{item.title}</span>
+                  <div className="min-w-0">
+                    <span>{item.title}</span>
+                    {networkDetails.has(item.id) && (
+                      <p className="mt-1 text-xs break-words text-muted-foreground">{item.actual}</p>
+                    )}
+                  </div>
                 </div>
               ))}
               {!normalItems.length && <span className="text-muted-foreground">暂无</span>}

@@ -8,7 +8,7 @@ test("DNS parsers keep all resolvers and exclude Fastly client IP", () => {
       dns_resolver_info: { ip: "8.8.8.8", cc: "US", as_name: "Google" },
       client_ip_info: { ip: "1.2.3.4" },
     }),
-    [{ ip: "8.8.8.8", geo: "US · Google" }],
+    [{ ip: "8.8.8.8", geo: "US · Google", country: "US" }],
   );
   assert.equal(
     parseDnsResponse("BrowserLeaks DNS6", {
@@ -20,6 +20,12 @@ test("DNS parsers keep all resolvers and exclude Fastly client IP", () => {
   assert.deepEqual(
     parseDnsResponse("Surfshark", { "8.8.8.8": { ISP: "Google", Leak: true } }),
     [{ ip: "8.8.8.8", geo: "Google" }],
+  );
+  assert.deepEqual(
+    parseDnsResponse("Surfshark", {
+      "8.8.8.8": { Country: "United States", CountryCode: "us", ISP: "Google" },
+    }),
+    [{ ip: "8.8.8.8", geo: "United States · Google", country: "US" }],
   );
   assert.deepEqual(
     parseDnsResponse("Fastly", { client_ip_info: { ip: "1.2.3.4" } }),
@@ -53,6 +59,7 @@ test("multi-source probes merge results, retain failures and use fresh domains",
     assert.equal(result.failed, 3);
     assert.equal(result.results.length, 2);
     assert.equal(result.results[0].samples, 13);
+    assert.equal(result.results[0].country, "US");
     assert.equal(result.results[0].sources.length, 3);
     assert.equal(new Set(urls).size, 16);
     assert.deepEqual(snapshots[0].results, []);

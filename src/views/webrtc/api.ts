@@ -46,7 +46,7 @@ export function isPublicCandidate(ip: string) {
 }
 export async function collectCandidates(
   signal: AbortSignal,
-): Promise<RtcResult[]> {
+): Promise<(RtcResult & { kind?: string })[]> {
   if (typeof RTCPeerConnection === "undefined")
     throw new Error(t("当前浏览器不支持 WebRTC，无法完成检测。"));
   const pc = new RTCPeerConnection({
@@ -56,7 +56,7 @@ export async function collectCandidates(
       { urls: "stun:stun1.l.google.com:19302" },
     ],
   });
-  const found = new Map<string, RtcResult>();
+  const found = new Map<string, RtcResult & { kind?: string }>();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let abort: () => void = () => {};
   try {
@@ -77,6 +77,7 @@ export async function collectCandidates(
         const type = candidate.type ?? candidate.candidate.split(" ")[7];
         found.set(ip, {
           ip,
+          kind: type,
           type:
             type === "srflx"
               ? t("公网 (STUN)")

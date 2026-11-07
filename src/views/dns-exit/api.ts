@@ -22,7 +22,15 @@ export const dnsSources = [
     samples: 3,
   },
 ] as const;
-export type DnsResolver = { ip: string; geo: string };
+export type DnsResolver = { ip: string; geo: string; country?: string };
+
+function countryCode(value: unknown) {
+  if (typeof value !== "string") return {};
+  const code = value.trim().toUpperCase();
+  return /^[A-Z]{2}$/.test(code) && code !== "XX" && code !== "ZZ"
+    ? { country: code }
+    : {};
+}
 
 export function parseDnsResponse(source: string, data: unknown): DnsResolver[] {
   if (!data || typeof data !== "object") return [];
@@ -37,6 +45,7 @@ export function parseDnsResponse(source: string, data: unknown): DnsResolver[] {
             geo: [info.cc, info.as_name]
               .filter((v) => typeof v === "string")
               .join(" · "),
+            ...countryCode(info.cc),
           },
         ]
       : [];
@@ -51,6 +60,7 @@ export function parseDnsResponse(source: string, data: unknown): DnsResolver[] {
             .slice(1)
             .filter((v) => typeof v === "string")
             .join(" · "),
+          ...countryCode(value[0]),
         },
       ];
     }
@@ -62,6 +72,7 @@ export function parseDnsResponse(source: string, data: unknown): DnsResolver[] {
           geo: [info.Country, info.City, info.ISP]
             .filter((v) => typeof v === "string")
             .join(" · "),
+          ...countryCode(info.CountryCode),
         },
       ];
     }
@@ -129,6 +140,7 @@ export async function detectDnsExits(
               const found = results.find((item) => item.ip === resolver.ip);
               if (found) {
                 found.samples++;
+                if (resolver.country) found.country ??= resolver.country;
                 if (!found.sources.includes(source.name))
                   found.sources.push(source.name);
               } else
