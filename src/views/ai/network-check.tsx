@@ -1,7 +1,9 @@
 import { type ReactNode, useState } from "react";
+import { Link } from "react-router-dom";
 import { LatencyBadge } from "@/components/latency-badge";
 import { SiteLogo } from "@/components/site-logo";
 import { IpText, Pending } from "@/components/toolkit";
+import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import {
   Table,
@@ -15,6 +17,7 @@ import { useSortAnimation } from "@/hooks/use-sort-animation";
 import { t } from "@/i18n";
 import { trace } from "@/lib/network";
 import { withDetectionAnimation } from "@/views/browser/with-feedback";
+import { getStatus } from "@/views/status/api";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { aiPlatforms } from "./platforms";
@@ -23,9 +26,11 @@ import { probeAiDomain } from "./probe";
 export function AiNetworkCheck({
   domains,
   children,
+  summary,
 }: {
   domains: string[];
   children?: ReactNode;
+  summary?: { statusId: string; statusPath: string };
 }) {
   const [refreshing, setRefreshing] = useState(false);
   const query = useQuery({
@@ -36,6 +41,15 @@ export function AiNetworkCheck({
     retry: false,
     refetchOnWindowFocus: false,
   });
+  const status = useQuery({
+    queryKey: ["service-status", summary?.statusId],
+    enabled: !!summary,
+    queryFn: ({ signal }) => getStatus(summary!.statusId, signal),
+    staleTime: 60_000,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+  const official = status.isError ? undefined : status.data?.status;
   const platforms = domains.map((domain) =>
     aiPlatforms.find((platform) => platform.domain === domain),
   );
@@ -51,7 +65,10 @@ export function AiNetworkCheck({
     })),
   });
   const busy =
-    refreshing || query.isFetching || exits.some((exit) => exit.isFetching);
+    refreshing ||
+    query.isFetching ||
+    status.isFetching ||
+    exits.some((exit) => exit.isFetching);
   const orderedDomains = domains.map((domain, index) => ({
     domain,
     result: query.data?.[index],
@@ -82,6 +99,7 @@ export function AiNetworkCheck({
                     ...exits
                       .filter((_, index) => platforms[index]?.traceDomain)
                       .map((exit) => exit.refetch()),
+                    ...(summary ? [status.refetch()] : []),
                   ]),
                 );
                 if (next.data?.every((result) => result.median != null))
@@ -104,7 +122,7 @@ export function AiNetworkCheck({
             <TableHeader>
               <TableRow>
                 <TableHead>{t("域名")}</TableHead>
-                <TableHead>{t("出口")} IP</TableHead>
+                {!summary && <TableHead>{t("出口")} IP</TableHead>}
                 <TableHead className="text-right">{t("延迟")}</TableHead>
               </TableRow>
             </TableHeader>
@@ -117,18 +135,20 @@ export function AiNetworkCheck({
                       <span>{domain}</span>
                     </span>
                   </TableCell>
-                  <TableCell className="ai-connectivity-exit text-muted-foreground">
-                    <span className="sm:hidden">{t("出口 IP：")} </span>
-                    {exit.isFetching ? (
-                      <Pending>{t("检测中…")}</Pending>
-                    ) : exit.data?.ip ? (
-                      <IpText ip={exit.data.ip} />
-                    ) : (
-                      <span title={t("未获取到出口，可能受跨域或连接限制。")}>
-                        {t("暂不可用")}
-                      </span>
-                    )}
-                  </TableCell>
+                  {!summary && (
+                    <TableCell className="ai-connectivity-exit text-muted-foreground">
+                      <span className="sm:hidden">{t("出口 IP：")} </span>
+                      {exit.isFetching ? (
+                        <Pending>{t("检测中…")}</Pending>
+                      ) : exit.data?.ip ? (
+                        <IpText ip={exit.data.ip} />
+                      ) : (
+                        <span title={t("未获取到出口，可能受跨域或连接限制。")}>
+                          {t("暂不可用")}
+                        </span>
+                      )}
+                    </TableCell>
+                  )}
                   <TableCell className="ai-connectivity-latency text-right">
                     {query.isFetching ? (
                       <Pending>{t("检测中…")}</Pending>
@@ -152,6 +172,34 @@ export function AiNetworkCheck({
             </TableBody>
           </Table>
         </div>
+        {summary && (
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-sm">
+            <Link
+              to={summary.statusPath}
+              className="underline-offset-4 hover:underline"
+            >
+              {t("官方服务状态")}
+            </Link>
+            {status.isPending ? (
+              <Pending />
+            ) : (
+              <Badge
+                className="h-auto whitespace-normal"
+                variant={
+                  !official
+                    ? "secondary"
+                    : official.indicator === "none"
+                      ? "success"
+                      : "warning"
+                }
+              >
+                {official?.description
+                  ? t(official.description)
+                  : t("暂不可用")}
+              </Badge>
+            )}
+          </div>
+        )}
         <p className="small muted mt-2">
           {t(
             "检测的是站点资源响应，不等于登录或对话可用；跨站限制和超时不会判为“未连通”。",
