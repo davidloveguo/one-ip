@@ -76,6 +76,7 @@ export interface CoffeeIp {
 }
 export interface CoffeeLookup extends Lookup {
   coffee: CoffeeIp;
+  fallback?: boolean;
 }
 export function coffeeThreatLabels(data: CoffeeIp, riskOnly = false): string[] {
   return (data.intelligence?.threats ?? [])

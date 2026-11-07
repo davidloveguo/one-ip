@@ -2,13 +2,14 @@ import { useLayoutEffect, useRef, useState, useId } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { LookupForm } from "@/components/lookup-form";
 import { IpText, ErrorNotice, Pending } from "@/components/toolkit";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { useLookupHistory } from "@/hooks/use-lookup-history";
 import { t } from "@/i18n";
 import { useQuery } from "@tanstack/react-query";
 import { gsap } from "gsap";
 import { Search, X } from "lucide-react";
-import { lookupIp } from "./api";
+import { lookupIpWithFallback } from "./api";
 import type { CoffeeLookup } from "./coffee";
 import { IpDetails } from "./details";
 
@@ -25,8 +26,8 @@ export default function IpPage() {
     staleTime: 300_000,
     retry: false,
     queryFn: async ({ signal }) => {
-      const result = await lookupIp(ip, signal);
-      history.save(ip, result);
+      const result = await lookupIpWithFallback(ip, signal);
+      if (!result.fallback) history.save(ip, result);
       return result;
     },
   });
@@ -128,6 +129,12 @@ export default function IpPage() {
     <div className="lookup-page ip-detail-page">
       <h1 className="sr-only">{t("IP 信息查询")}</h1>
       <ErrorNotice error={query.error} />
+      {query.data?.fallback && (
+        <Alert className="mb-3">
+          <AlertTitle>{t("基础信息")}</AlertTitle>
+          <AlertDescription>{query.data.risk.reason}</AlertDescription>
+        </Alert>
+      )}
       {query.isFetching && (
         <p className="status-line" role="status">
           <Pending>{t("查询中…")}</Pending>
